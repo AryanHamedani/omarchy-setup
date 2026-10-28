@@ -1,0 +1,41 @@
+#!/bin/bash
+# The desk PC working on this laptop over RDP (hypr-rdp, see ~/.config/hypr-rdp/config.toml).
+#
+# While the PC is connected the laptop stays awake with its lid shut; hypr-rdp gives the PC
+# its own screen and turns the panel off (exclusive_session). When the PC leaves, a shut
+# laptop locks.
+# On AC it stays awake so the PC can connect again (even locked); on battery logind suspends it.
+#
+#   rdp-session start|end   hypr-rdp's session hooks
+#   rdp-session lid         lid closed (bound in hypr/bindings.lua)
+#   rdp-session active      exit 0 while the PC is connected
+
+UNIT=rdp-session-awake
+
+active() {
+  systemctl --user -q is-active $UNIT
+}
+
+case "$1" in
+  start)
+    active || systemd-run --user --quiet --unit=$UNIT \
+      systemd-inhibit --what=handle-lid-switch:sleep --who="Desk PC" --why="Connected over RDP" sleep infinity
+    ;;
+  end)
+    active || exit 0
+    # Lock first: releasing the inhibitor lets logind act on a shut lid (suspend on battery only,
+    # see /etc/systemd/logind.conf.d/30-rdp-lid.conf).
+    omarchy-hw-laptop-closed && omarchy-system-lid-close
+    systemctl --user stop $UNIT
+    ;;
+  lid)
+    active || exec omarchy-system-lid-close
+    ;;
+  active)
+    active
+    ;;
+  *)
+    echo "Usage: rdp-session start|end|lid|active" >&2
+    exit 1
+    ;;
+esac

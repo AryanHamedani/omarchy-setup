@@ -1,0 +1,20 @@
+#!/bin/bash
+# Remote Desktop into the Windows PC. Extra args are passed to FreeRDP.
+# Username: $WINPC_USER (save it with `vault set WINPC_USER`), else asked for.
+# Microsoft-account logins use the account email; the password is the account
+# password, not the Windows Hello PIN.
+# xfreerdp3: the SDL client reads an 80x80 window size under Hyprland and refuses to connect.
+# /sec:tls signs in through Windows' own login (NLA is off on the PC; NLA rejected the
+# Microsoft-account login). Ctrl+Alt+Enter leaves/enters fullscreen.
+
+user=${WINPC_USER:-}
+if [[ -z $user && " $* " != *" /u:"* ]]; then
+  read -rp "Windows username (email for a Microsoft account): " user
+fi
+
+# Windows wants Microsoft-account emails as MicrosoftAccount\email; a bare email
+# makes FreeRDP treat the domain (gmail.com) as a Kerberos realm.
+[[ $user == *@* && $user != *\\* ]] && user="MicrosoftAccount\\$user"
+
+exec xfreerdp3 /v:192.168.1.50 ${user:+"/u:$user"} /sec:tls /f /dynamic-resolution /gfx:avc444 \
+  /sound /microphone +clipboard /network:lan /cert:tofu "$@"

@@ -1,0 +1,21 @@
+# hypr-rdp: the desk PC works on this laptop over RDP (Remote Desktop Connection, 192.168.1.55).
+# Started by ~/.config/systemd/user/hypr-rdp.service; the password is $LAPTOP_RDP_PASSWORD from the vault.
+
+bind = "0.0.0.0:3389"
+username = "aryan"
+
+# The PC gets its own screen, sized to the PC monitor holding the RDP window. While it is
+# connected the laptop panel is off and every workspace and window is on that screen.
+# Needs the patched hypr-rdp from github.com/AryanHamedani/omarchy-setup (hypr-rdp/).
+exclusive_session = true
+fps = 60
+bitrate = 30000000
+
+# Lossless, damage-only frames: sharp text (H.264 avc420 halves colour resolution).
+egfx_codec = "clearcodec"
+
+# Keep this laptop's keyboard layouts (us/ir, ALT+ALT switches) instead of Windows'.
+keyboard_layout_policy = "compositor"
+
+on_session_start = "$HOME/.local/bin/rdp-session start"
+on_session_end = "$HOME/.local/bin/rdp-session end"

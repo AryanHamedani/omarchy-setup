@@ -1,0 +1,93 @@
+#!/bin/bash
+# Tokens and API keys as plain exported env vars, kept in one file (~/.config/vault/env, mode 600).
+# ~/.bashrc sources it in every terminal; a Claude Code SessionStart hook loads it for Claude.
+#
+#   vault set <VAR> [description]   Add or replace a value (typed hidden, or piped on stdin)
+#   vault rm <VAR>                  Delete a value
+#   vault list                      List variable names and descriptions (no values)
+#   vault edit                      Open the file in $EDITOR
+#   vault claude-hook               SessionStart hook: load vars into Claude's shell
+
+set -euo pipefail
+
+ENV_FILE="$HOME/.config/vault/env"
+
+die() { echo "vault: $*" >&2; exit 1; }
+
+ensure_file() {
+  mkdir -p "$(dirname "$ENV_FILE")"
+  [[ -f $ENV_FILE ]] || printf '## Managed by `vault`. Each entry: a "# description" line, then an export.\n' >"$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+# Drop VAR's export line and the description comment right above it.
+remove_entry() {
+  awk -v var="$1" '
+    /^# / { pending = $0; next }
+    $0 ~ "^export " var "=" { pending = ""; next }
+    { if (pending != "") print pending; pending = ""; print }
+    END { if (pending != "") print pending }
+  ' "$ENV_FILE" >"$ENV_FILE.tmp"
+  mv "$ENV_FILE.tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+# Print "NAME<TAB>description" per entry.
+entries() {
+  [[ -f $ENV_FILE ]] || return 0
+  awk '
+    /^# / { desc = substr($0, 3); next }
+    /^export [A-Za-z_][A-Za-z0-9_]*=/ {
+      name = $2; sub(/=.*/, "", name); print name "\t" desc; desc = ""; next
+    }
+    { desc = "" }
+  ' "$ENV_FILE"
+}
+
+cmd_set() {
+  local name=${1:-} desc=${2:-} value
+  [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "usage: vault set <VAR_NAME> [description]"
+  if [[ -t 0 ]]; then
+    read -rsp "Value for $name: " value; echo
+  else
+    IFS= read -r value || [[ -n $value ]]
+  fi
+  [[ -n $value ]] || die "empty value, nothing stored"
+
+  ensure_file
+  remove_entry "$name"
+  { [[ -n $desc ]] && printf '# %s\n' "$desc"; printf 'export %s=%q\n' "$name" "$value"; } >>"$ENV_FILE"
+  echo "Saved $name. New terminals have it; in this one run: source $ENV_FILE"
+}
+
+cmd_rm() {
+  [[ -n ${1:-} ]] || die "usage: vault rm <VAR_NAME>"
+  [[ -f $ENV_FILE ]] && remove_entry "$1"
+  echo "Removed $1."
+}
+
+cmd_list() {
+  entries | awk -F'\t' '{ printf "%-28s %s\n", $1, $2 }'
+}
+
+cmd_edit() {
+  ensure_file
+  exec "${EDITOR:-nvim}" "$ENV_FILE"
+}
+
+cmd_claude_hook() {
+  local lines
+  [[ -n ${CLAUDE_ENV_FILE:-} && -f $ENV_FILE ]] || exit 0
+  echo "source '$ENV_FILE'" >>"$CLAUDE_ENV_FILE"
+
+  lines=$(entries | awk -F'\t' '{ print "- $" $1 ($2 != "" ? " — " $2 : "") }')
+  [[ -n $lines ]] || exit 0
+  jq -n --arg ctx "These environment variables from the user's vault are set in your Bash shell. Use them by reference (e.g. \"\$NAME\") when a tool or API needs them; avoid printing their values:
+$lines" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
+}
+
+case "${1:-}" in
+set | rm | list | edit) cmd=$1; shift; "cmd_$cmd" "$@" ;;
+claude-hook) shift; cmd_claude_hook "$@" ;;
+*) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 1 ;;
+esac

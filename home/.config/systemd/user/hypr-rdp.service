@@ -1,0 +1,15 @@
+[Unit]
+Description=RDP server for the desk PC (see ~/.config/hypr-rdp/config.toml)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# The password lives in the vault (vault set LAPTOP_RDP_PASSWORD); hypr-rdp reads it from a private file.
+ExecStartPre=/bin/bash -c 'umask 077; . %h/.config/vault/env; printf %%s "$LAPTOP_RDP_PASSWORD" > %t/hypr-rdp-password'
+ExecStart=/usr/bin/hypr-rdp --password-file %t/hypr-rdp-password
+ExecStopPost=%h/.local/bin/rdp-session end
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.aryanhamedani.jalali-calendar",
+  "name": "Jalali Calendar",
+  "version": "1.0.0",
+  "author": "Aryan Hamedani",
+  "license": "MIT",
+  "description": "The stock clock on the Persian calendar, with official holidays and occasions",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Jalali Calendar",
+    "description": "Jalali date/time label with a calendar of Iranian holidays and occasions",
+    "category": "Time",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

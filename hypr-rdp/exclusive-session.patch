@@ -1,0 +1,861 @@
+From ad2ef8ba6f7a292b40435d13472477f543b8baf9 Mon Sep 17 00:00:00 2001
+From: Aryan Hamedani <aryn.hmd@gmail.com>
+Date: Thu, 29 Oct 2026 02:39:28 +0330
+Subject: [PATCH] feat(capture): add exclusive sessions
+
+With exclusive_session (--exclusive-session), the headless output is off
+between sessions. When a client connects it is turned on, the other outputs
+are turned off, and Hyprland moves every workspace and window to it, keeping
+the workspace that was in front. On disconnect the other outputs come back
+with their exact settings before the headless output goes off, so Hyprland
+always keeps an output. Config reloads re-apply this state, and a restart
+after an unclean exit reloads Hyprland's config to bring the outputs back.
+
+The virtual pointer is bound again when the headless output returns, since
+turning it off destroys its wl_output.
+
+Also: a late initial-size request no longer overrides a DisplayControl layout
+from the same session (it restarted capture and dropped clients that connect
+on a portrait monitor), and Lua monitor rules carry disabled = false like
+their legacy form, so they turn a disabled output back on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/capture/mod.rs            | 317 +++++++++++++++++++++++++++++++++-
+ src/capture/wayland/mod.rs    |   4 +-
+ src/capture/wayland/output.rs |  12 +-
+ src/config.rs                 |  14 ++
+ src/hyprland.rs               | 109 +++++++++++-
+ src/input/layout.rs           |  12 ++
+ src/input/wayland.rs          |  46 +++++
+ src/server/mod.rs             |  24 ++-
+ 8 files changed, 526 insertions(+), 12 deletions(-)
+
+diff --git a/src/capture/mod.rs b/src/capture/mod.rs
+index e00493b..25992ef 100644
+--- a/src/capture/mod.rs
++++ b/src/capture/mod.rs
+@@ -56,6 +56,15 @@ struct HyprDisplayInner {
+     output: Option<String>,
+     headless_scale: f64,
+     resolution_fixed: bool,
++    /// Keep the headless output off between sessions and the other outputs
++    /// off during one (see `take_over`).
++    exclusive_session: bool,
++    /// The outputs a session turned off, to turn back on as they were.
++    parked_outputs: Vec<crate::hyprland::OutputRule>,
++    session_active: bool,
++    /// A DisplayControl layout set the size for this session, so a late
++    /// initial-size request must not override it.
++    display_control_layout: bool,
+     stop_flag: Arc<AtomicBool>,
+     capture_handle: Option<std::thread::JoinHandle<()>>,
+     headless_guard: Option<HeadlessOutputGuard>,
+@@ -72,9 +81,211 @@ impl HyprDisplayInner {
+         if let Some(handle) = self.capture_handle.take() {
+             let _ = handle.join();
+         }
+-        // Thread exited, Wayland connection closed. Safe to remove output.
++        // Thread exited, Wayland connection closed. Safe to remove output,
++        // once the outputs a session turned off are back on.
++        self.hand_back();
++        if self.exclusive_session && self.headless_guard.is_some() {
++            // Hyprland only removes an output that is on.
++            let (width, height) = self.resolution;
++            if let Err(error) =
++                resize_headless_output(&self.output_name, width, height, self.headless_scale)
++            {
++                tracing::warn!(%error, "Failed to turn the headless output on for removal");
++            }
++        }
+         drop(self.headless_guard.take());
+     }
++
++    /// Exclusive session start: turn the headless output on at the session's
++    /// size, then the other outputs off, so Hyprland moves every workspace and
++    /// window to it. The headless output comes first, so Hyprland is never
++    /// left without an output.
++    fn take_over(&mut self) -> Result<()> {
++        if !self.exclusive_session || self.session_active {
++            return Ok(());
++        }
++        // The workspace in front now stays in front on the headless output.
++        let workspace = active_workspace(|m| m["focused"].as_bool() == Some(true));
++        let (width, height) = self.resolution;
++        resize_headless_output(&self.output_name, width, height, self.headless_scale)?;
++        self.session_active = true;
++        self.output_layout.bump_output_epoch();
++        self.park_other_outputs_keeping(workspace)?;
++        self.output_layout
++            .update_from_output_with_presentation(&self.output_name, self.resolution)
++            .context("failed to refresh layout after taking over the outputs")
++    }
++
++    /// Park the other outputs, then bring `workspace` back in front: Hyprland
++    /// moves the parked outputs' workspaces over asynchronously, and the
++    /// headless output may show a fresh one meanwhile.
++    fn park_other_outputs_keeping(&mut self, workspace: Option<i64>) -> Result<()> {
++        self.park_other_outputs()?;
++        let all_moved = || {
++            crate::hyprland::workspaces()
++                .ok()
++                .is_some_and(|workspaces| {
++                    workspaces.as_array().is_some_and(|workspaces| {
++                        workspaces
++                            .iter()
++                            .all(|w| w["monitor"].as_str() == Some(self.output_name.as_str()))
++                    })
++                })
++        };
++        let deadline = std::time::Instant::now() + Duration::from_secs(5);
++        while !all_moved() && std::time::Instant::now() < deadline {
++            std::thread::sleep(Duration::from_millis(50));
++        }
++        let Some(id) = workspace else {
++            return Ok(());
++        };
++        // A reload settles its monitor changes after the event, which can put a
++        // fresh workspace in front later: hold `id` in front until it stays.
++        let name = self.output_name.clone();
++        let on_headless = |m: &serde_json::Value| m["name"].as_str() == Some(name.as_str());
++        let deadline = std::time::Instant::now() + Duration::from_secs(2);
++        let mut steady = 0;
++        while steady < 4 && std::time::Instant::now() < deadline {
++            if active_workspace(on_headless) == Some(id) {
++                steady += 1;
++            } else {
++                steady = 0;
++                if let Err(error) = crate::hyprland::focus_workspace(id) {
++                    tracing::warn!(%error, "Failed to bring the workspace in front");
++                    break;
++                }
++            }
++            std::thread::sleep(Duration::from_millis(100));
++        }
++        Ok(())
++    }
++
++    fn park_other_outputs(&mut self) -> Result<()> {
++        let monitors = crate::hyprland::monitors()?;
++        let others = monitors
++            .as_array()
++            .context("expected monitors array")?
++            .iter()
++            .filter(|m| m["name"].as_str() != Some(self.output_name.as_str()));
++        for monitor in others {
++            let rule = crate::hyprland::OutputRule::from_monitor(monitor)?;
++            tracing::info!(output = %rule.name, "Turning output off for the session");
++            crate::hyprland::disable_output(&rule.name)?;
++            if !self
++                .parked_outputs
++                .iter()
++                .any(|parked| parked.name == rule.name)
++            {
++                self.parked_outputs.push(rule);
++            }
++        }
++        Ok(())
++    }
++
++    /// Exclusive session end: turn the parked outputs back on as they were,
++    /// then the headless output off, so Hyprland moves everything back.
++    fn hand_back(&mut self) {
++        if !self.session_active {
++            return;
++        }
++        for rule in self.parked_outputs.drain(..) {
++            tracing::info!(output = %rule.name, "Turning output back on");
++            if let Err(error) = rule.apply() {
++                tracing::warn!(output = %rule.name, %error, "Failed to turn output back on");
++            }
++        }
++        self.session_active = false;
++        // Hyprland turns outputs on asynchronously; the headless output may only
++        // go off once another one is on.
++        let deadline = std::time::Instant::now() + Duration::from_secs(5);
++        while !wayland::other_outputs_on(&self.output_name) && std::time::Instant::now() < deadline
++        {
++            std::thread::sleep(Duration::from_millis(50));
++        }
++        self.park_headless_output();
++    }
++
++    fn park_headless_output(&self) {
++        if !self.exclusive_session || self.headless_guard.is_none() {
++            return;
++        }
++        // Hyprland must keep an output: never turn off the last one.
++        if !wayland::other_outputs_on(&self.output_name) {
++            tracing::warn!("Keeping the headless output on: no other output is on");
++            return;
++        }
++        if let Err(error) = crate::hyprland::disable_output(&self.output_name) {
++            tracing::warn!(%error, "Failed to turn the headless output off");
++        }
++    }
++
++    /// A config reload drops runtime monitor rules: put the outputs back in
++    /// the state the session left them in.
++    fn reapply_outputs(&mut self) {
++        if !self.exclusive_session || self.closed {
++            return;
++        }
++        if !self.session_active {
++            self.park_headless_output();
++            return;
++        }
++        let (width, height) = self.resolution;
++        let mode = format!("{width}x{height}@60");
++        let rule = wayland::headless_monitor_rule(&self.output_name, &mode, self.headless_scale);
++        if let Err(error) = crate::hyprland::keyword_monitor(&rule) {
++            tracing::warn!(%error, "Failed to restore the headless output after a config reload");
++        }
++        // The reload turned the parked outputs back on; outputs plugged in
++        // meanwhile are parked too.
++        // The reload hands the parked outputs their workspaces back and gives
++        // the headless output a fresh one; keep the returning one in front.
++        let name = self.output_name.clone();
++        let workspace = active_workspace(|m| m["name"].as_str() != Some(name.as_str()))
++            .or_else(|| active_workspace(|m| m["name"].as_str() == Some(name.as_str())));
++        if let Err(error) = self.park_other_outputs_keeping(workspace) {
++            tracing::warn!(%error, "Failed to turn outputs off after a config reload");
++        }
++    }
++}
++
++/// The active workspace of the first output matching `pick`.
++fn active_workspace(pick: impl Fn(&serde_json::Value) -> bool) -> Option<i64> {
++    let monitors = crate::hyprland::monitors().ok()?;
++    monitors.as_array()?.iter().find(|m| pick(m))?["activeWorkspace"]["id"].as_i64()
++}
++
++/// Re-apply exclusive-session output state whenever Hyprland reloads its config.
++fn watch_config_reloads(inner: Arc<Mutex<HyprDisplayInner>>) {
++    std::thread::spawn(move || {
++        let mut events = match crate::hyprland::EventStream::connect() {
++            Ok(events) => events,
++            Err(error) => {
++                tracing::warn!(%error, "Cannot watch Hyprland config reloads");
++                return;
++            }
++        };
++        loop {
++            match events.next_event(Duration::from_secs(1)) {
++                Ok(Some((event, _))) if event == "configreloaded" => {
++                    let mut inner = inner.blocking_lock();
++                    if inner.closed {
++                        return;
++                    }
++                    tracing::info!("Hyprland reloaded its config; restoring session outputs");
++                    inner.reapply_outputs();
++                }
++                Ok(_) => {
++                    if inner.blocking_lock().closed {
++                        return;
++                    }
++                }
++                Err(error) => {
++                    tracing::warn!(%error, "Stopped watching Hyprland config reloads");
++                    return;
++                }
++            }
++        }
++    });
+ }
+ 
+ impl Drop for HyprDisplayInner {
+@@ -92,6 +303,51 @@ pub struct HyprDisplayHandle {
+ }
+ 
+ impl HyprDisplayHandle {
++    /// Exclusive sessions: turn the headless output off until a client
++    /// connects. Call once input is set up, since that binds to the output.
++    pub async fn park_until_session(&self) -> Result<()> {
++        let inner = self.inner.lock().await;
++        if !inner.exclusive_session {
++            return Ok(());
++        }
++        if !wayland::other_outputs_on(&inner.output_name) {
++            // A previous run ended mid-session and left the other outputs off.
++            tracing::warn!("No other output is on; reloading Hyprland's config to restore them");
++            crate::hyprland::reload().context("failed to reload Hyprland's config")?;
++        }
++        inner.park_headless_output();
++        drop(inner);
++        watch_config_reloads(Arc::clone(&self.inner));
++        Ok(())
++    }
++
++    /// The client left: stop capturing, forget its DisplayControl size and hand
++    /// the outputs back. Runs off the server's task so a slow compositor can't stall it.
++    pub fn session_ended(&self) {
++        let inner = Arc::clone(&self.inner);
++        std::thread::spawn(move || {
++            let gate = Arc::clone(&inner.blocking_lock().resize_gate);
++            let _permit = gate.blocking_lock();
++            let (stop_flag, handle) = {
++                let mut inner = inner.blocking_lock();
++                inner.display_control_layout = false;
++                if !inner.exclusive_session || inner.closed {
++                    return;
++                }
++                (Arc::clone(&inner.stop_flag), inner.capture_handle.take())
++            };
++            // The headless output is about to go off: stop capturing it first.
++            stop_flag.store(true, Ordering::Release);
++            if let Some(handle) = handle {
++                session_memory::join_previous_capture(handle);
++            }
++            let mut inner = inner.blocking_lock();
++            if !inner.closed {
++                inner.hand_back();
++            }
++        });
++    }
++
+     pub async fn shutdown(&self) {
+         let gate = {
+             let mut inner = self.inner.lock().await;
+@@ -414,6 +670,7 @@ impl HyprDisplay {
+         h264_backend: H264BackendPolicy,
+         resolution_fixed: bool,
+         output: Option<String>,
++        exclusive_session: bool,
+     ) -> Result<(Self, HyprDisplayHandle, (u16, u16))> {
+         let (tx, rx) = mpsc::channel(128);
+         let requested_resolution = resolution;
+@@ -527,6 +784,10 @@ impl HyprDisplay {
+             output,
+             headless_scale,
+             resolution_fixed,
++            exclusive_session,
++            parked_outputs: Vec::new(),
++            session_active: false,
++            display_control_layout: false,
+             stop_flag,
+             capture_handle: None,
+             headless_guard,
+@@ -578,6 +839,19 @@ impl HyprDisplay {
+                     "Client requested size exceeds H.264 software encoder policy limit; clamping"
+                 );
+             }
++            if inner.display_control_layout {
++                tracing::info!(
++                    client_w = client_size.width,
++                    client_h = client_size.height,
++                    applied_w = inner.width,
++                    applied_h = inner.height,
++                    "Client requested initial size after a DisplayControl layout; keeping that layout"
++                );
++                return DesktopSize {
++                    width: inner.width,
++                    height: inner.height,
++                };
++            }
+             let decision = initial_size_resize_decision(
+                 inner.output.is_some(),
+                 inner.resolution_fixed,
+@@ -685,6 +959,7 @@ impl HyprDisplay {
+         if inner.closed {
+             return;
+         }
++        inner.display_control_layout = true;
+         let source_size = inner
+             .output_layout
+             .snapshot()
+@@ -823,6 +1098,12 @@ impl RdpServerDisplay for HyprDisplay {
+             .await;
+         }
+ 
++        let lease = Arc::clone(&self.inner);
++        tokio::task::spawn_blocking(move || lease.blocking_lock().take_over())
++            .await
++            .map_err(|error| capture_start_error(error.into()))?
++            .map_err(capture_start_error)?;
++
+         let mut inner = self.inner.lock().await;
+         if inner.closed {
+             return Err(ServerError::reason(
+@@ -1050,6 +1331,10 @@ mod output_downscaling {
+             output: Some("DP-1".into()),
+             headless_scale: 1.0,
+             resolution_fixed: false,
++            exclusive_session: false,
++            parked_outputs: Vec::new(),
++            session_active: false,
++            display_control_layout: false,
+             stop_flag: Arc::new(AtomicBool::new(false)),
+             capture_handle: None,
+             headless_guard: None,
+@@ -1298,6 +1583,32 @@ mod output_downscaling {
+         assert_eq!(echo, None);
+     }
+ 
++    #[tokio::test]
++    async fn initial_size_after_displaycontrol_keeps_the_displaycontrol_size() {
++        let (mut display, _rx, _shared, _layout) =
++            physical_display_for_callback_test_with_source((1920, 1080), (1080, 1920));
++        display.inner.lock().await.display_control_layout = true;
++
++        let size = display
++            .request_initial_size_with(
++                DesktopSize {
++                    width: 1920,
++                    height: 1080,
++                },
++                |_name, _width, _height, _scale| panic!("must not resize"),
++                |_name, _size| panic!("must not prepare a new layout"),
++            )
++            .await;
++
++        assert_eq!(
++            size,
++            DesktopSize {
++                width: 1080,
++                height: 1920
++            }
++        );
++    }
++
+     #[tokio::test]
+     async fn physical_output_initial_size_callback_updates_presentation_state() {
+         let (mut display, _rx, shared, _layout) =
+@@ -1629,6 +1940,10 @@ mod managed_headless_resize {
+             output: None,
+             headless_scale: 1.0,
+             resolution_fixed: false,
++            exclusive_session: false,
++            parked_outputs: Vec::new(),
++            session_active: false,
++            display_control_layout: false,
+             stop_flag: Arc::new(AtomicBool::new(false)),
+             capture_handle: None,
+             headless_guard: None,
+diff --git a/src/capture/wayland/mod.rs b/src/capture/wayland/mod.rs
+index 964538c..98d0475 100644
+--- a/src/capture/wayland/mod.rs
++++ b/src/capture/wayland/mod.rs
+@@ -12,8 +12,8 @@ use super::CaptureMode;
+ use crate::egfx::{EgfxShared, H264BackendPolicy, H264RateControl};
+ use crate::input::{OutputLayoutSnapshot, SharedOutputLayout};
+ pub(crate) use output::{
+-    create_headless_output, headless_monitor_rule, list_stale_headless_outputs, output_info,
+-    wait_for_output_size, HeadlessOutputGuard,
++    create_headless_output, headless_monitor_rule, list_stale_headless_outputs, other_outputs_on,
++    output_info, wait_for_output_size, HeadlessOutputGuard,
+ };
+ use wayland_client::Connection;
+ 
+diff --git a/src/capture/wayland/output.rs b/src/capture/wayland/output.rs
+index 10ee6c1..0742af4 100644
+--- a/src/capture/wayland/output.rs
++++ b/src/capture/wayland/output.rs
+@@ -39,8 +39,18 @@ pub(crate) fn headless_monitor_rule(name: &str, mode: &str, scale: f64) -> Strin
+ }
+ 
+ /// List headless outputs created by hypr-rdp (name starts with "hypr-rdp-").
++/// Whether an output other than `name` is on.
++pub(crate) fn other_outputs_on(name: &str) -> bool {
++    crate::hyprland::monitors().ok().is_some_and(|monitors| {
++        monitors
++            .as_array()
++            .is_some_and(|monitors| monitors.iter().any(|m| m["name"].as_str() != Some(name)))
++    })
++}
++
+ pub(crate) fn list_stale_headless_outputs() -> Result<Vec<String>> {
+-    let monitors = crate::hyprland::monitors()?;
++    // Include disabled outputs: an exclusive-session server keeps its own off between sessions.
++    let monitors = crate::hyprland::monitors_all()?;
+     let arr = monitors.as_array().context("expected monitors array")?;
+     Ok(arr
+         .iter()
+diff --git a/src/config.rs b/src/config.rs
+index bcff2e1..d3abb0d 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -157,6 +157,11 @@ struct Args {
+     #[arg(long)]
+     output: Option<String>,
+ 
++    /// Keep the headless output off between sessions; while a client is
++    /// connected, turn the other outputs off so everything moves to it
++    #[arg(long)]
++    exclusive_session: bool,
++
+     /// Shell command to run when an authenticated session starts
+     /// (without configured credentials: any established session)
+     #[arg(long)]
+@@ -208,6 +213,7 @@ struct ConfigFile {
+     audio_mode: Option<String>,
+     h264_backend: Option<String>,
+     output: Option<String>,
++    exclusive_session: Option<bool>,
+     on_session_start: Option<String>,
+     on_session_end: Option<String>,
+     file_transfer_mode: Option<String>,
+@@ -279,6 +285,7 @@ pub struct RuntimeConfig {
+     pub h264_backend: H264BackendPolicy,
+     pub resolution_fixed: bool,
+     pub output: Option<String>,
++    pub exclusive_session: bool,
+     pub on_session_start: Option<String>,
+     pub on_session_end: Option<String>,
+     pub file_transfer_mode: FileTransferMode,
+@@ -453,6 +460,12 @@ impl RuntimeConfig {
+         let audio_mode = resolve_audio_mode(args.audio_mode, config.audio_mode)?;
+         let h264_backend = resolve_h264_backend_policy(args.h264_backend, config.h264_backend)?;
+         let output = args.output.or(config.output);
++        let exclusive_session = args.exclusive_session || config.exclusive_session.unwrap_or(false);
++        if exclusive_session && output.is_some() {
++            anyhow::bail!(
++                "exclusive_session needs hypr-rdp's own headless output; remove `output`"
++            );
++        }
+         let on_session_start = args.on_session_start.or(config.on_session_start);
+         let on_session_end = args.on_session_end.or(config.on_session_end);
+         let file_transfer_max_chunk_bytes = args
+@@ -500,6 +513,7 @@ impl RuntimeConfig {
+             h264_backend,
+             resolution_fixed,
+             output,
++            exclusive_session,
+             on_session_start,
+             on_session_end,
+             file_transfer_mode,
+diff --git a/src/hyprland.rs b/src/hyprland.rs
+index 3998124..ad63b81 100644
+--- a/src/hyprland.rs
++++ b/src/hyprland.rs
+@@ -202,6 +202,105 @@ pub fn monitors() -> Result<serde_json::Value> {
+     serde_json::from_str(&response).context("failed to parse Hyprland monitors JSON")
+ }
+ 
++/// Query every output, including disabled ones, as JSON value (array).
++pub fn monitors_all() -> Result<serde_json::Value> {
++    let response = send_command("j/monitors all")?;
++    serde_json::from_str(&response).context("failed to parse Hyprland monitors JSON")
++}
++
++/// An enabled output's settings, kept so it can be turned back on as it was.
++#[derive(Debug, Clone, PartialEq)]
++pub struct OutputRule {
++    pub name: String,
++    mode: String,
++    position: String,
++    scale: f64,
++    transform: u8,
++}
++
++impl OutputRule {
++    /// Read the rule back from one entry of `j/monitors`.
++    pub fn from_monitor(monitor: &serde_json::Value) -> Result<Self> {
++        let name = monitor["name"]
++            .as_str()
++            .context("monitor has missing or invalid 'name'")?;
++        let field = |key: &str| {
++            monitor[key]
++                .as_f64()
++                .with_context(|| format!("output '{name}' has missing or invalid '{key}'"))
++        };
++        Ok(Self {
++            name: name.to_string(),
++            mode: format!(
++                "{}x{}@{:.3}",
++                field("width")?,
++                field("height")?,
++                field("refreshRate")?
++            ),
++            position: format!("{}x{}", field("x")?, field("y")?),
++            scale: field("scale")?,
++            transform: u8::try_from(field("transform")? as u64)
++                .context("output transform is out of range")?,
++        })
++    }
++
++    /// Turn the output back on with these settings.
++    pub fn apply(&self) -> Result<()> {
++        let legacy = format!(
++            "{},{},{},{},transform,{}",
++            self.name, self.mode, self.position, self.scale, self.transform
++        );
++        let lua = format!(
++            "hl.monitor({{ output = {}, mode = {}, position = {}, scale = {}, transform = {}, disabled = false }})",
++            lua_string(&self.name)?,
++            lua_string(&self.mode)?,
++            lua_string(&self.position)?,
++            self.scale,
++            self.transform
++        );
++        monitor_action(&legacy, &lua)
++    }
++}
++
++/// Query workspaces as JSON value (array).
++pub fn workspaces() -> Result<serde_json::Value> {
++    let response = send_command("j/workspaces")?;
++    serde_json::from_str(&response).context("failed to parse Hyprland workspaces JSON")
++}
++
++/// Switch to a workspace by id.
++pub fn focus_workspace(id: i64) -> Result<()> {
++    match send_action(&format!("dispatch workspace {id}")) {
++        Ok(()) => Ok(()),
++        // Lua-config Hyprland takes dispatchers as Lua.
++        Err(_) => send_action(&format!(
++            "dispatch hl.dsp.focus({{ workspace = \"{id}\" }})"
++        )),
++    }
++}
++
++/// Reload Hyprland's config, which also drops runtime monitor rules.
++pub fn reload() -> Result<()> {
++    send_action("reload")
++}
++
++/// Turn an output off. Hyprland moves its workspaces to the remaining outputs.
++pub fn disable_output(name: &str) -> Result<()> {
++    let lua = format!(
++        "hl.monitor({{ output = {}, disabled = true }})",
++        lua_string(name)?
++    );
++    monitor_action(&format!("{name},disable"), &lua)
++}
++
++fn monitor_action(legacy_rule: &str, lua: &str) -> Result<()> {
++    match send_action(&format!("keyword monitor {legacy_rule}")) {
++        Ok(()) => Ok(()),
++        Err(e) if is_non_legacy_parser_error(&e) => send_action(&format!("eval {lua}")),
++        Err(e) => Err(e),
++    }
++}
++
+ /// Query input devices as JSON value (object with a "keyboards" array).
+ pub fn devices() -> Result<serde_json::Value> {
+     let response = send_command("j/devices")?;
+@@ -263,7 +362,9 @@ fn monitor_rule_to_lua(rule: &str) -> Result<String> {
+     };
+ 
+     Ok(format!(
+-        "hl.monitor({{ output = {}, mode = {}, position = {}, scale = {} }})",
++        // A legacy rule with a mode turns the output on; say so in Lua, where a
++        // runtime `disabled = true` would otherwise stick.
++        "hl.monitor({{ output = {}, mode = {}, position = {}, scale = {}, disabled = false }})",
+         lua_string(output)?,
+         lua_string(mode)?,
+         lua_string(position)?,
+@@ -563,7 +664,7 @@ mod tests {
+ 
+         assert_eq!(
+             lua,
+-            r#"hl.monitor({ output = "hypr-rdp-1", mode = "2560x1440@60", position = "-9999x0", scale = 1.5 })"#
++            r#"hl.monitor({ output = "hypr-rdp-1", mode = "2560x1440@60", position = "-9999x0", scale = 1.5, disabled = false })"#
+         );
+     }
+ 
+@@ -573,7 +674,7 @@ mod tests {
+ 
+         assert_eq!(
+             lua,
+-            r#"hl.monitor({ output = "DP-1", mode = "preferred", position = "auto", scale = "auto" })"#
++            r#"hl.monitor({ output = "DP-1", mode = "preferred", position = "auto", scale = "auto", disabled = false })"#
+         );
+     }
+ 
+@@ -584,7 +685,7 @@ mod tests {
+ 
+         assert_eq!(
+             lua,
+-            r#"hl.monitor({ output = "DP-\"1", mode = "modeline 1\\2", position = "0x0", scale = 1 })"#
++            r#"hl.monitor({ output = "DP-\"1", mode = "modeline 1\\2", position = "0x0", scale = 1, disabled = false })"#
+         );
+     }
+ 
+diff --git a/src/input/layout.rs b/src/input/layout.rs
+index 1758849..655100b 100644
+--- a/src/input/layout.rs
++++ b/src/input/layout.rs
+@@ -38,6 +38,9 @@ pub(crate) struct PreparedOutputLayout {
+ #[derive(Debug, Default)]
+ pub struct SharedOutputLayout {
+     inner: Mutex<Option<OutputLayoutSnapshot>>,
++    /// Bumped when the output was turned off and on again: its old wl_output
++    /// is gone, so the input side must bind its pointer to the new one.
++    output_epoch: std::sync::atomic::AtomicU64,
+ }
+ 
+ impl SharedOutputLayout {
+@@ -45,6 +48,15 @@ impl SharedOutputLayout {
+         Self::default()
+     }
+ 
++    pub fn bump_output_epoch(&self) {
++        self.output_epoch
++            .fetch_add(1, std::sync::atomic::Ordering::Release);
++    }
++
++    pub fn output_epoch(&self) -> u64 {
++        self.output_epoch.load(std::sync::atomic::Ordering::Acquire)
++    }
++
+     pub fn update_from_output(&self, output_name: &str) -> Result<()> {
+         let (
+             output_w,
+diff --git a/src/input/wayland.rs b/src/input/wayland.rs
+index 4db7484..c567064 100644
+--- a/src/input/wayland.rs
++++ b/src/input/wayland.rs
+@@ -41,11 +41,55 @@ struct WaylandInput {
+     vk: ZwpVirtualKeyboardV1,
+     vp: ZwlrVirtualPointerV1,
+     output_layout: Arc<SharedOutputLayout>,
++    /// The output epoch the pointer is bound to.
++    pointer_epoch: u64,
+     scroll_residual_v: i64,
+     scroll_residual_h: i64,
+ }
+ 
+ impl WaylandInput {
++    /// Bind the pointer to the output's current wl_output after the output was
++    /// turned off and on again (exclusive sessions).
++    fn rebind_pointer_if_needed(&mut self) {
++        let epoch = self.output_layout.output_epoch();
++        if epoch == self.pointer_epoch {
++            return;
++        }
++        let Some(layout) = self.output_layout.snapshot() else {
++            return;
++        };
++        // Two roundtrips: the new wl_output global, then its name.
++        for _ in 0..2 {
++            if let Err(error) = self.event_queue.roundtrip(&mut self.wl_state) {
++                tracing::warn!(%error, "Wayland roundtrip failed while rebinding the pointer");
++                return;
++            }
++        }
++        let (Some(seat), Some(vp_mgr)) =
++            (self.wl_state.seat.clone(), self.wl_state.vp_manager.clone())
++        else {
++            return;
++        };
++        let Some(output) = self
++            .wl_state
++            .outputs
++            .iter()
++            .find(|(_, name)| name.as_deref() == Some(layout.output_name.as_str()))
++            .map(|(output, _)| output.clone())
++        else {
++            tracing::warn!(output = %layout.output_name, "wl_output not found; pointer not rebound");
++            return;
++        };
++        let qh = self.event_queue.handle();
++        let vp = vp_mgr.create_virtual_pointer_with_output(Some(&seat), Some(&output), &qh, ());
++        std::mem::replace(&mut self.vp, vp).destroy();
++        for (output, _) in self.wl_state.outputs.drain(..) {
++            output.release();
++        }
++        self.pointer_epoch = epoch;
++        tracing::info!(output = %layout.output_name, "Pointer bound to the output again");
++    }
++
+     fn dispatch_pending(&mut self) {
+         if let Err(e) = self.event_queue.dispatch_pending(&mut self.wl_state) {
+             tracing::trace!("Wayland dispatch_pending failed: {}", e);
+@@ -90,6 +134,7 @@ impl KeyboardSink for WaylandInput {
+ 
+ impl InputBackend for WaylandInput {
+     fn mouse(&mut self, t: u32, event: MouseEvent) {
++        self.rebind_pointer_if_needed();
+         if emit_mouse_event(
+             &self.vp,
+             || self.output_layout.snapshot(),
+@@ -475,6 +520,7 @@ impl HyprInputHandler {
+             wl_state,
+             vk,
+             vp,
++            pointer_epoch: output_layout.output_epoch(),
+             output_layout,
+             scroll_residual_v: 0,
+             scroll_residual_h: 0,
+diff --git a/src/server/mod.rs b/src/server/mod.rs
+index 74ef5e6..5013cb7 100644
+--- a/src/server/mod.rs
++++ b/src/server/mod.rs
+@@ -57,6 +57,7 @@ pub async fn setup(config: RuntimeConfig) -> Result<ServerContext> {
+         h264_backend,
+         resolution_fixed,
+         output,
++        exclusive_session,
+         on_session_start,
+         on_session_end,
+         file_transfer_mode,
+@@ -83,6 +84,7 @@ pub async fn setup(config: RuntimeConfig) -> Result<ServerContext> {
+         h264_backend,
+         resolution_fixed,
+         output,
++        exclusive_session,
+     )
+     .await
+     .context("failed to initialize display capture")?;
+@@ -90,6 +92,10 @@ pub async fn setup(config: RuntimeConfig) -> Result<ServerContext> {
+     let input_handler =
+         HyprInputHandler::new(rdp_width, rdp_height, output_layout, keyboard_layout_policy)
+             .context("failed to initialize input handler")?;
++    display_handle
++        .park_until_session()
++        .await
++        .context("failed to prepare the exclusive session")?;
+     let input_session_sink = input_handler
+         .rdp_input_session_handle()
+         .context("input handler has no command channel")?;
+@@ -126,10 +132,10 @@ pub async fn setup(config: RuntimeConfig) -> Result<ServerContext> {
+         .with_display_handler(display)
+         .with_credential_validator(authentication.validator)
+         .with_connection_policy(security_mode.connection_policy())
+-        .with_connection_handler(Some(Box::new(ClientConnectionHandler::new(
+-            input_session_sink,
+-            session_hooks,
+-        ))))
++        .with_connection_handler(Some(Box::new(
++            ClientConnectionHandler::new(input_session_sink, session_hooks)
++                .with_display_handle(display_handle.clone()),
++        )))
+         .with_gfx_factory(Some(Box::new(gfx_factory)))
+         .with_cliprdr_factory(Some(Box::new(cliprdr_factory)))
+         .with_sound_factory(sound_factory)
+@@ -166,6 +172,7 @@ fn server_run_error(error: ServerError) -> anyhow::Error {
+ struct ClientConnectionHandler {
+     input_session_sink: Box<dyn RdpInputSessionSink>,
+     session_hooks: Option<SessionHooks>,
++    display_handle: Option<HyprDisplayHandle>,
+ }
+ 
+ impl ClientConnectionHandler {
+@@ -176,8 +183,14 @@ impl ClientConnectionHandler {
+         Self {
+             input_session_sink,
+             session_hooks,
++            display_handle: None,
+         }
+     }
++
++    fn with_display_handle(mut self, display_handle: HyprDisplayHandle) -> Self {
++        self.display_handle = Some(display_handle);
++        self
++    }
+ }
+ 
+ impl ConnectionHandler for ClientConnectionHandler {
+@@ -199,6 +212,9 @@ impl ConnectionHandler for ClientConnectionHandler {
+         _error: Option<&ServerError>,
+     ) -> PostConnectionAction {
+         self.input_session_sink.session_ended();
++        if let Some(display) = &self.display_handle {
++            display.session_ended();
++        }
+         if let Some(hooks) = &mut self.session_hooks {
+             hooks.session_ended();
+         }
+-- 
+2.56.0
+

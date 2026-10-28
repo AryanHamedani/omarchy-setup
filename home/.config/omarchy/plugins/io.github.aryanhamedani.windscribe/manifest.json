@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.aryanhamedani.windscribe",
+  "name": "Windscribe",
+  "version": "1.0.0",
+  "author": "Aryan Hamedani",
+  "license": "MIT",
+  "description": "Windscribe connection, locations, censorship settings and Iranian bypass controls.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Panel.qml"},
+  "barWidget": {
+    "displayName": "Windscribe", "description": "VPN status and controls", "category": "Network",
+    "allowMultiple": false, "defaultSection": "right", "defaults": {}, "schema": []
+  }
+}

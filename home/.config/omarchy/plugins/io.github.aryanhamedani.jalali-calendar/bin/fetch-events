@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Rebuild events/<year>.json from time.ir's official calendar, by way of
+# holidayapi.ir. Lunar dates are fixed each year by moon sighting, so the
+# religious occasions and the official holiday list cannot be computed; they
+# are fetched once per year and shipped with the plugin instead, which keeps
+# the calendar working offline.
+#
+#   bin/fetch-events 1405 1406
+
+set -eo pipefail
+
+cd "$(dirname "$0")/.."
+
+days_of() {
+  local year=$1 esfand=29
+  # A leap year is one whose 30 Esfand exists.
+  if curl -sf "https://holidayapi.ir/jalali/$year/12/30" >/dev/null; then esfand=30; fi
+  for month in $(seq 1 12); do
+    local days=$(( month <= 6 ? 31 : month <= 11 ? 30 : esfand ))
+    for day in $(seq 1 "$days"); do printf "%d %02d %02d\n" "$year" "$month" "$day"; done
+  done
+}
+
+# Fridays are listed as events of their own; the grid knows its weekends.
+# An event's date line names its calendar, so a Hijri month there is what
+# marks it lunar; the solar and Gregorian ones ship in national.json and
+# international.json instead.
+fetch_day() {
+  curl -sf --retry 3 "https://holidayapi.ir/jalali/$1/$2/$3" | jq -c --arg key "$2-$3" '
+    [ .events[] | select(.description != "جمعه") ] as $events
+    | { key: $key,
+        holiday: ($events | any(.is_holiday)),
+        events: [ $events[]
+          | select(.additional_description | test("محرم|صفر|ربیع|جمادی|رجب|شعبان|رمضان|شوال|ذی|ذو"))
+          | .description | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") ] }'
+}
+export -f fetch_day
+
+for year in "$@"; do
+  days_of "$year" |
+    xargs -P 8 -n 3 bash -c 'fetch_day "$@"' _ |
+    jq -sc 'map(select(.holiday or (.events | length > 0))) | sort_by(.key) | map({ (.key): del(.key) }) | add' \
+      > "events/$year.json"
+  echo "events/$year.json: $(jq length "events/$year.json") days"
+done

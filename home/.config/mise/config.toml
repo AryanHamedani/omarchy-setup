@@ -1,0 +1,37 @@
+[tools]
+acli = "latest"
+bun = "latest"
+claude = "latest"
+codex = "latest"
+gh = "latest"
+"github:ankitpokhrel/jira-cli" = "latest"
+"github:steipete/gogcli" = "latest"
+glab = "latest"
+go = "latest"
+helm = "latest"
+k9s = "latest"
+kubectl = "latest"
+kubectx = "latest"
+node = "26.12.0"
+"npm:mongosh" = "latest"
+"npm:pyright" = "latest"
+"npm:typescript" = "latest"
+"npm:typescript-language-server" = "latest"
+"pipx:pgcli" = "latest"
+pre-commit = "latest"
+python = "3.14"
+ruff = "latest"
+rust-analyzer = "latest"
+sentry-cli = "latest"
+usql = "latest"
+uv = "latest"
+wrangler = { version = "latest", allow_builds = ["esbuild", "sharp", "workerd"] }
+xh = "latest"
+yq = "latest"
+zig = "0.15.2"
+
+[settings]
+idiomatic_version_file_enable_tools = ["python", "node"]
+
+[settings.upgrade]
+auto_prune = false

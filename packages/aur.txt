@@ -1,0 +1,8 @@
+bruno-bin
+mattermost-desktop-bin
+otf-geist
+persian-fonts
+ttf-estedad
+ttf-lalezar
+vazirmatn-fonts
+windscribe-cli
