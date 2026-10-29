@@ -62,7 +62,7 @@ services() {
 }
 
 desk() {
-  step "Desk PC over RDP: hypr-rdp with exclusive sessions (see README)"
+  step "Desk PC over RDP: hypr-rdp (see README)"
   # shellcheck source=/dev/null
   [[ -r ~/.config/vault/env ]] && source ~/.config/vault/env
   if [[ -z ${LAPTOP_RDP_PASSWORD:-} ]]; then
@@ -72,11 +72,7 @@ desk() {
     return 1
   fi
 
-  local build
-  build=$(mktemp -d)
-  cp "$REPO"/hypr-rdp/{PKGBUILD,exclusive-session.patch} "$build/"
-  (cd "$build" && makepkg -si --noconfirm)
-  rm -rf "$build"
+  omarchy pkg aur add hypr-rdp
 
   # On AC a shut, locked laptop stays reachable; on battery it suspends as usual.
   sudo install -D -m 644 "$REPO/system/etc/systemd/logind.conf.d/30-rdp-lid.conf" \

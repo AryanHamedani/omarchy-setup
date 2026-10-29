@@ -23,7 +23,7 @@ cd ~/omarchy-setup
 | `configs` | Copies [`home/`](home) into `~`. A file that differs is first backed up to `<file>.bak-<timestamp>` |
 | `tools` | `mise install` for the dev tools in [`mise/config.toml`](home/.config/mise/config.toml) |
 | `services` | voxtype and the weekly Windscribe refresh as user services, plus Tailscale |
-| `desk` | Remote desktop from my Windows PC (below) |
+| `desk` | Remote desktop from my Windows PC into this laptop (below) |
 
 Every step can be run again safely. After the first run: log out and back in, run
 `sudo tailscale up --operator=$USER` and `windscribe-cli login` once.
@@ -49,24 +49,20 @@ Every step can be run again safely. After the first run: log out and back in, ru
 
 ## Desk: the Windows PC works on this laptop over RDP
 
-I lock the laptop, put it on its stand and work on it from the PC with Remote Desktop
-Connection. With [hypr-rdp](https://github.com/MuNeNICK/hypr-rdp) and the patch in
-[`hypr-rdp/`](hypr-rdp):
+I lock the laptop, put it on its stand (lid closed) and work on it from the PC with Remote
+Desktop Connection, served by [hypr-rdp](https://github.com/MuNeNICK/hypr-rdp):
 
-- While nobody is connected, Omarchy is unchanged: only the laptop screen.
-- When the PC connects, the session gets its own screen, sized to whichever PC monitor holds the
-  RDP window (it follows the window between the portrait and the landscape monitor). The laptop
-  panel goes off, and every workspace and window moves to the session.
-- When the PC disconnects, everything moves back to the laptop panel.
-- On AC power a closed or locked laptop stays reachable; on battery it suspends as usual.
+- The PC sees the laptop screen itself at 1920x1080, with the same workspaces, windows and shortcuts.
+- While the PC is connected, the laptop stays awake with its lid shut and its panel dimmed.
+- When the PC disconnects with the lid shut, the laptop locks. On AC power it stays awake and
+  reachable; on battery it suspends as usual.
 
-The patch adds an `exclusive_session` option to hypr-rdp 0.1.7, and fixes clients that connect on a
-portrait monitor getting dropped. `install.sh desk` builds the patched package with `makepkg`.
-It needs the RDP password in the vault first:
+`install.sh desk` needs the RDP password in the vault first:
 `vault set LAPTOP_RDP_PASSWORD "Password the desk PC uses to RDP into this laptop"`.
 
-A newer hypr-rdp from the AUR would replace the patched build. RDP keeps working, but the session
-screen then stays around as an extra monitor until the patch is rebased.
+The session doesn't resize to a portrait monitor. hypr-rdp can give the PC its own screen that
+does, but with the lid shut Hyprland won't turn that screen on until the lid opens, so sessions
+started on a closed laptop fail.
 
 ## Not included
 
@@ -75,4 +71,4 @@ Omarchy already ships by default.
 
 ## License
 
-MIT. The hypr-rdp patch is a change to hypr-rdp, also MIT.
+MIT.
