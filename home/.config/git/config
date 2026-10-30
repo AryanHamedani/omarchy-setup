@@ -38,3 +38,8 @@
 	pager = delta
 [interactive]
 	diffFilter = delta --color-only
+[fetch]
+	prune = true
+[rebase]
+	autoStash = true
+	updateRefs = true

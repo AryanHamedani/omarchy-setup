@@ -4,7 +4,7 @@
 #   ./install.sh               every step, in order
 #   ./install.sh configs desk  only the named steps
 #
-# Steps: packages shell configs plugins tools kubevpn services desk
+# Steps: packages shell configs plugins tools kubevpn claudecode services desk
 # Re-running is safe: installed packages are skipped and a config that differs is backed up
 # to <file>.bak-<timestamp> before it is replaced.
 set -euo pipefail
@@ -60,6 +60,13 @@ plugins() {
 tools() {
   step "Dev tools from ~/.config/mise/config.toml"
   mise install
+  local d=~/.local/share/zsh/site-functions
+  mkdir -p "$d"
+  glab completion -s zsh >"$d/_glab"
+  jira completion zsh >"$d/_jira"
+  k9s completion zsh >"$d/_k9s"
+  mise completion zsh >"$d/_mise"
+  sentry-cli completions zsh >"$d/_sentry-cli" 2>/dev/null
 }
 
 # kubectl, k9s and helm for one cluster through an isolated OpenVPN container
@@ -72,6 +79,23 @@ kubevpn() {
   git -C "$dir" pull --ff-only
   echo "  Select the cluster's context, then run once:"
   echo "    python3 $dir/install.py --profile /path/to/vpn.ovpn"
+}
+
+# Hooks and agents arrive with `configs`. Settings are merged, never replaced, so
+# plugins and MCP servers that only exist on this machine stay.
+claudecode() {
+  step "Claude Code: marketplaces, plugins and settings"
+  claude --version >/dev/null # Omarchy's launcher installs it on first use
+  claude plugin marketplace add DietrichGebert/ponytail
+  claude plugin marketplace add openai/codex-plugin-cc
+  local have plugin
+  have=$(claude plugin list --json | jq -r '.[].id')
+  # Reinstalling takes seconds per plugin, so only the missing ones.
+  while read -r plugin; do
+    grep -qxF "$plugin" <<<"$have" || claude plugin install "$plugin"
+  done <"$REPO/packages/claude-plugins.txt"
+  [[ -e ~/.claude/settings.json ]] && cp -a ~/.claude/settings.json ~/.claude/settings.json.bak-"$STAMP"
+  python3 "$REPO/claude/merge-settings.py" "$REPO/claude/settings.json"
 }
 
 services() {
@@ -108,7 +132,7 @@ desk() {
   systemctl --user --no-pager status hypr-rdp.service | head -3
 }
 
-all=(packages shell configs plugins tools kubevpn services desk)
+all=(packages shell configs plugins tools kubevpn claudecode services desk)
 steps=("$@")
 ((${#steps[@]})) || steps=("${all[@]}")
 for name in "${steps[@]}"; do

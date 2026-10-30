@@ -1,0 +1,91 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(secret-tool lookup *)",
+      "Bash(secret-tool search *)",
+      "Bash(gh auth token *)",
+      "Bash(vault run gh auth token *)",
+      "Bash(glab config get token *)",
+      "Bash(vault run glab config get token *)",
+      "Bash(glab auth status -t *)",
+      "Bash(glab auth status --show-token *)",
+      "Read(~/.config/gh/hosts.yml)",
+      "Read(~/.config/glab-cli/config.yml)",
+      "Read(~/.local/share/keyrings/**)"
+    ],
+    "ask": [
+      "Bash(vault rm *)"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/vault claude-hook",
+            "timeout": 15,
+            "statusMessage": "Loading vault variables"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/ruff-after-edit.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/worktree-guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "DietrichGebert/ponytail"
+      }
+    },
+    "openai-codex": {
+      "source": {
+        "source": "github",
+        "repo": "openai/codex-plugin-cc"
+      }
+    }
+  },
+  "pluginConfigs": {
+    "ponytail@ponytail": {
+      "options": {
+        "ledger": true,
+        "sendNames": true
+      }
+    },
+    "yank": {
+      "options": {
+        "frameColor": "#414868",
+        "accentColor": "#7aa2f7"
+      }
+    }
+  },
+  "askUserQuestionTimeout": "never",
+  "theme": "custom:omarchy",
+  "editorMode": "vim",
+  "inputNeededNotifEnabled": true
+}

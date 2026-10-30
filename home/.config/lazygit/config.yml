@@ -1,0 +1,4 @@
+# Diffs through delta, same look as `git diff`.
+git:
+  diffRenderers:
+    - command: delta --paging=never

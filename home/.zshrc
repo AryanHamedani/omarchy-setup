@@ -12,7 +12,8 @@ plugins=(
 )
 
 # Extra completions (zsh-completions package) before compinit runs.
-fpath=(/usr/share/zsh/site-functions $fpath)
+# ~/.local/share/zsh/site-functions holds generated ones (glab, jira, k9s, mise, sentry-cli).
+fpath=(~/.local/share/zsh/site-functions /usr/share/zsh/site-functions $fpath)
 
 source "$ZSH/oh-my-zsh.sh"
 
@@ -65,6 +66,11 @@ bindkey '^[[A' history-substring-search-up
 bindkey '^[[B' history-substring-search-down
 
 # Your own aliases and functions go below.
+
+# Work shortcuts
+alias dj='uv run python manage.py'   # Django: dj runserver, dj shell_plus, dj migrate
+alias pt='uv run pytest'
+alias lg='lazygit' lzd='lazydocker'
 
 
 # Claude with the Telegram channel (bot token: vault set TELEGRAM_BOT_TOKEN)

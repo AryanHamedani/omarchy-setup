@@ -7,8 +7,9 @@
           "id": "omarchy.indicators"
         },
         {
+          "id": "io.github.aryanhamedani.jalali-calendar",
           "format": "MM/dd HH:mm:ss",
-          "id": "io.github.aryanhamedani.jalali-calendar"
+          "weekStartDay": "saturday"
         },
         {
           "id": "omarchy.keyboard-layout"

@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# rv: review queue and AI first pass for the GitLab MRs of the repo you're in.
+# Reviewing, comments, drafts and threads are gitlab.nvim's; rv adds the queue, the AI layer and pinned approval.
+#
+#   rv                     queue of ready MRs (alt-d: include drafts); keys in its header
+#   rv <iid>               review one MR: gitlab.nvim reviewer on the MR branch, AI findings on <leader>r
+#   rv ai <iid> [focus]    AI first pass with live progress; focus e.g. "auth only" or "views.py"
+#   rv ai-all              AI first pass on every ready MR without one, 3 at a time
+#   rv ask <iid>           read-only Claude chat about the MR
+#   rv fix <iid>           Claude fixes your accepted findings on the MR branch (commits, never pushes)
+#   rv approve <iid>       approve, pinned to the commit you opened
+#   rv diff <iid>          whole diff in delta
+#   rv done <iid>          remove the worktree rv created for the MR (never an agent's)
+#
+# Findings file (~/.cache/rv/<project>/<iid>.qf), one per line:
+#   # verdict / dropped                          ignored
+#   path:line: (ai) [bug] text                   AI finding you haven't accepted
+#   path:line: [read] why                        hunk a human must read
+#   path:line: [bug] text                        accepted (<leader>ry), used by `rv fix`
+set -euo pipefail
+
+self=$(realpath "$0")
+main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)") # main checkout, also from a worktree
+cd "$main"
+project=$(git remote get-url origin | sed -E 's#^(git@[^:]+:|[a-z]+://[^/]+/)##; s#\.git$##')
+pid=$(jq -rn --arg p "$project" '$p|@uri')
+cache=~/.cache/rv/${project//\//_}
+mkdir -p "$cache"
+
+mr() { glab api "projects/$pid/merge_requests/$1"; }
+pause() { read -rp "${1:-enter: back} " _ </dev/tty || true; }
+confirm() { local a; read -rp "$1 [y/N] " a </dev/tty; [[ $a == y ]]; }
+
+# Sets t s sha base title author for MR $1.
+meta() {
+  local j
+  j=$(mr "$1")
+  IFS=$'\t' read -r t s sha title author < <(jq -r '[.target_branch,.source_branch,.sha,.title,.author.username]|@tsv' <<<"$j")
+  git cat-file -e "$sha" 2>/dev/null || git fetch -q origin "$t" "$s"
+  base=$(git merge-base "origin/$t" "$sha")
+}
+
+# Accepted findings: what `rv fix` hands to Claude.
+accepted() {
+  local line
+  while IFS= read -r line; do
+    [[ $line =~ ^[^#\ :][^:]*:[0-9]+:\ (.*)$ ]] || continue
+    case ${BASH_REMATCH[1]} in "(ai) "* | "[read] "*) continue ;; esac
+    printf '%s\n' "$line"
+  done <"$cache/$1.qf"
+}
+
+list() {
+  local drafts=false
+  [[ ${1:-} == --drafts ]] && drafts=true
+  git fetch -q origin
+  glab api "projects/$pid/merge_requests?state=opened&per_page=100" |
+    jq -r --argjson d "$drafts" '.[] | select($d or (.draft|not)) | [.iid,.author.username,.target_branch,.source_branch,.sha,.detailed_merge_status,.title]|@tsv' |
+    while IFS=$'\t' read -r iid author t s head status title; do
+      size=$(git diff --numstat "origin/$t...origin/$s" 2>/dev/null | awk '{a+=$1;d+=$2} END{printf "+%d/-%d",a,d}')
+      f=$cache/$iid.qf seen=new
+      [[ -f $cache/$iid.sha ]] && { [[ $(<"$cache/$iid.sha") == "$head" ]] && seen=seen || seen=Δ; }
+      if [[ -e $cache/$iid.running ]]; then rev="ai…"
+      elif [[ -f $f ]]; then rev="$(grep -c ': (ai) ' "$f" || true)?/$( (accepted "$iid" || true) | wc -l)✓"
+      else rev="-"; fi
+      printf '!%s\t%-10s\t%-12s\t%-4s\t%-6s\t%-12s\t%s\n' "$iid" "$author" "$size" "$seen" "$rev" "$status" "$title"
+    done
+}
+
+preview() {
+  local f=$cache/$1.qf
+  [[ -s $f ]] && { cat "$f"; echo; }
+  glab mr view "$1" 2>/dev/null | head -80
+}
+
+# Worktree with the MR branch checked out (gitlab.nvim finds the MR by branch).
+# An agent's worktree for the branch is used as it is; one rv creates is kept at the MR head.
+worktree() {
+  local w
+  git worktree prune
+  w=$(git worktree list --porcelain | awk -v b="branch refs/heads/$s" '/^worktree /{w=substr($0,10)} $0==b{print w}')
+  if [[ -z $w ]]; then
+    w=$main/.claude/worktrees/${s//\//-}
+    if git show-ref -q --verify "refs/heads/$s"; then
+      git worktree add -q "$w" "$s"
+    else
+      git worktree add -q --track -b "$s" "$w" "origin/$s"
+      echo "$s" >"$cache/$1.branch"
+    fi
+    echo "$w" >"$cache/$1.wt"
+  fi
+  if [[ $(git -C "$w" rev-parse HEAD) != "$sha" ]]; then
+    if [[ $(cat "$cache/$1.wt" 2>/dev/null) == "$w" ]] && git -C "$w" merge -q --ff-only "$sha" 2>/dev/null; then :
+    else echo "rv: $w is at $(git -C "$w" rev-parse --short HEAD), not the MR head ${sha:0:9}; reviewing it as it is" >&2; fi
+  fi
+  echo "$w"
+}
+
+# MR facts for Claude sessions (ask, fix, nvim's <leader>ra).
+context() {
+  local c=$cache/$1.ctx.md
+  {
+    echo "You are helping Aryan review GitLab merge request !$1 \"$title\" by $author in $project."
+    echo "The diff under review is \`git diff $base $sha\` (merge base of $t .. MR head). Description and threads: \`glab mr view $1 --comments\`."
+    echo "Review notes so far, one per line (path:line: text; (ai) = unconfirmed AI finding, [read] = hunk to read):"
+    cat "$cache/$1.qf" 2>/dev/null || true
+  } >"$c"
+  echo "$c"
+}
+
+open() {
+  meta "$1"
+  local w f=$cache/$1.qf prev=""
+  w=$(worktree "$1")
+  touch "$f"
+  [[ -f $cache/$1.sha && $(<"$cache/$1.sha") != "$sha" ]] && { prev=$(<"$cache/$1.sha"); echo "$prev" >"$cache/$1.prev"; }
+  [[ -z $prev && -f $cache/$1.prev ]] && prev=$(<"$cache/$1.prev")
+  echo "$sha" >"$cache/$1.sha"
+  cd "$w"
+  RV_IID=$1 RV_FILE=$f RV_PREV=$prev RV_CTX=$(context "$1") nvim
+}
+
+ai() {
+  local iid=$1 focus=${*:2} w f=$cache/$1.qf
+  meta "$iid"
+  w=$(worktree "$iid")
+  running=$cache/$iid.running
+  touch "$running"
+  trap 'rm -f "$running"' EXIT
+  echo "rv: AI review of !$iid${focus:+ (focus: $focus)}"
+  (cd "$w" && claude -p --output-format stream-json --verbose \
+    --disallowedTools Edit Write NotebookEdit \
+    --allowedTools Read Grep Glob "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(glab mr view:*)" -- "$(cat <<EOF
+First-pass code review of merge request !$iid: $title
+Diff under review: \`git diff $base $sha\` (run it). The description is in \`glab mr view $iid\`. Read surrounding code with \`git show $sha:<path>\` or Read/Grep when a hunk depends on it.
+${focus:+Focus only on: $focus. Ignore the rest of the diff.}
+
+Output ONLY lines in these forms, nothing else, no code fences:
+# verdict: approve | needs changes | needs human judgement — one line why
+path/to/file:LINE: (ai) [bug|security|risk|perf|test] comment to the author, one or two sentences, with the concrete fix
+path/to/file:LINE: [read] why a human must read this hunk
+
+Rules: paths relative to the repo root; LINE is a line number in the new version, on a changed line. Report only problems you verified in the code: no praise, no style a linter would catch. Then add [read] lines for hunks a human must read even if you found nothing: migrations, auth and permissions, money, data deletion, external calls, concurrency, anything you are unsure about. Skip tests, generated files and lockfiles unless they are wrong.
+EOF
+)") | tee "$f.stream" | jq -r --unbuffered '
+      select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") |
+      "  → \(.name) \(.input.command // .input.file_path // .input.pattern // "" | tostring | .[:110])"' || true
+  jq -r 'select(.type == "result") | .result' "$f.stream" | grep -E '^#|^[^ :]+:[0-9]+: ' >"$f.new" || true
+  rm -f "$f.stream"
+  [[ -s $f.new ]] || { rm -f "$f.new"; echo "rv: the AI review of !$iid produced nothing" >&2; return 1; }
+  # Keep accepted and dropped entries; replace the previous AI output (all of it on a full pass).
+  if [[ -f $f ]]; then
+    if [[ -n $focus ]]; then grep -v '^# verdict' "$f" >>"$f.new" || true
+    else grep -vE ': \(ai\) |: \[read\] |^# verdict' "$f" >>"$f.new" || true; fi
+  fi
+  mv "$f.new" "$f"
+  [[ -n ${FZF_PORT:-} ]] && curl -s -XPOST "localhost:$FZF_PORT" -d "reload($self list)" >/dev/null || true
+  echo
+  grep '^# verdict' "$f" | head -1
+  echo "rv: $(grep -c ': (ai) ' "$f" || true) finding(s), $(grep -c ': \[read\] ' "$f" || true) hunk(s) to read"
+}
+
+ai_prompt() {
+  local focus
+  read -rp "AI review !$1. Focus (enter = whole MR): " focus </dev/tty
+  ai "$1" "$focus" || true
+  confirm "Open the review now?" && open "$1"
+}
+
+ai_all() {
+  list | cut -f1 | tr -d '!' | while read -r i; do [[ -f $cache/$i.qf ]] || echo "$i"; done |
+    xargs -r -P3 -I{} "$self" ai {} >/dev/null
+}
+
+ask() {
+  meta "$1"
+  local w c
+  w=$(worktree "$1")
+  c=$(context "$1")
+  cd "$w"
+  claude --permission-mode plan --append-system-prompt-file "$c" "Summarise MR !$1 in five lines: what it changes, the riskiest part, and what I should check first. Then wait for my questions."
+}
+
+fix() {
+  meta "$1"
+  local items w c
+  items=$(accepted "$1")
+  [[ -n $items ]] || { echo "rv: no accepted findings on !$1 (accept with <leader>ry in the review)"; return 1; }
+  w=$(worktree "$1")
+  c=$(context "$1")
+  [[ $author == aryn.hmd ]] || echo "rv: !$1 is $author's MR; Claude will commit on their branch but won't push"
+  cd "$w"
+  claude --append-system-prompt-file "$c" "Fix these review findings on branch $s (MR !$1). For each: check it is real, fix it, run the relevant tests, and commit with a message naming the finding. Do not push; tell me when you're done.
+
+$items"
+}
+
+approve() {
+  local head reviewed
+  head=$(mr "$1" | jq -r .sha)
+  reviewed=$(cat "$cache/$1.sha" 2>/dev/null) || { echo "rv: open !$1 first" >&2; return 1; }
+  [[ $reviewed == "$head" ]] || { echo "rv: !$1 changed since you opened it (${reviewed:0:8} -> ${head:0:8}); review it again" >&2; return 1; }
+  confirm "Approve !$1 at ${head:0:8}?" && glab mr approve "$1" --sha "$head"
+}
+
+done_() {
+  local w
+  w=$(cat "$cache/$1.wt" 2>/dev/null) || { echo "rv: no worktree created by rv for !$1"; return 0; }
+  # No --force / -D: git refuses if there are uncommitted changes or unpushed commits.
+  git worktree remove "$w" && rm -f "$cache/$1.wt"
+  if [[ -f $cache/$1.branch ]]; then git branch -d "$(<"$cache/$1.branch")" && rm -f "$cache/$1.branch"; fi
+  echo "rv: removed $w"
+}
+
+diff_() { meta "$1"; git diff "$base" "$sha" | delta --paging=always; }
+
+queue() {
+  local r="reload($self list)" h
+  h=$'enter review · ctrl-r AI (one, ask focus) · alt-r AI all · ctrl-a ask Claude · ctrl-f Claude fixes accepted\n'
+  h+=$'ctrl-d diff · alt-a approve · ctrl-o web · ctrl-x done · alt-d +drafts · ctrl-l reload'
+  list | fzf --listen --ansi --delimiter='\t' --no-sort --layout=reverse --header "$h" --header-first \
+    --preview "$self preview {1}" --preview-window 'right,50%,wrap' \
+    --bind "enter:execute($self open {1})+$r" \
+    --bind "ctrl-r:execute($self ai-prompt {1})+$r" \
+    --bind "alt-r:execute-silent(setsid -f $self ai-all >/dev/null 2>&1)+reload(sleep 1; $self list)" \
+    --bind "ctrl-a:execute($self ask {1})" \
+    --bind "ctrl-f:execute($self fix {1}; $self pause)+$r" \
+    --bind "ctrl-d:execute($self diff {1})" \
+    --bind "alt-a:execute($self approve {1}; $self pause)+$r" \
+    --bind "ctrl-o:execute-silent(glab mr view {1} --web)" \
+    --bind "ctrl-x:execute($self done {1}; $self pause)+$r" \
+    --bind "alt-d:reload($self list --drafts)" \
+    --bind "ctrl-l:$r"
+}
+
+cmd=${1:-queue}
+shift || true
+set -- "${@#!}" # accept !123 as well as 123
+case $cmd in
+queue | list | preview | open | ai | ask | fix | approve | pause) "$cmd" "$@" ;;
+ai-prompt) ai_prompt "$@" ;;
+ai-all) ai_all ;;
+diff) diff_ "$@" ;;
+done) done_ "$@" ;;
+!* | [0-9]*) open "${cmd#!}" ;;
+*) sed -n '2,20p' "$self" && exit 1 ;;
+esac

@@ -1,4 +1,6 @@
 bruno-bin
+jdtls
+kotlin-lsp-bin
 mattermost-desktop-bin
 otf-geist
 persian-fonts

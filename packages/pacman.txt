@@ -6,12 +6,18 @@ cloudflared
 dbeaver
 direnv
 dive
+dotnet-sdk
+element-desktop
 freerdp
+fwupd
 ghostty
 git-delta
 gopls
 inter-font
+kubectx
+mmctl
 openai-codex-desktop
+perf
 remmina
 stern
 tailscale
@@ -27,6 +33,7 @@ ttf-opensans
 ttf-roboto
 ttf-roboto-mono
 ttf-ubuntu-font-family
+usbutils
 voxtype-bin
 wezterm
 zen-browser-bin
