@@ -191,9 +191,11 @@ fix() {
   [[ -n $items ]] || { echo "rv: no accepted findings on !$1 (accept with <leader>ry in the review)"; return 1; }
   w=$(worktree "$1")
   c=$(context "$1")
-  [[ $author == aryn.hmd ]] || echo "rv: !$1 is $author's MR; Claude will commit on their branch but won't push"
+  local trust=()
+  # Someone else's branch is untrusted: ignore its .claude/ settings, hooks and .mcp.json (as ai/ask do).
+  [[ $author == aryn.hmd ]] || { trust=(--setting-sources user --strict-mcp-config); echo "rv: !$1 is $author's MR; Claude will commit on their branch but won't push"; }
   cd "$w"
-  claude --append-system-prompt-file "$c" "Fix these review findings on branch $s (MR !$1). For each: check it is real, fix it, run the relevant tests, and commit with a message naming the finding. Do not push; tell me when you're done.
+  claude "${trust[@]}" --append-system-prompt-file "$c" "Fix these review findings on branch $s (MR !$1). For each: check it is real, fix it, run the relevant tests, and commit with a message naming the finding. Do not push; tell me when you're done.
 
 $items"
 }
