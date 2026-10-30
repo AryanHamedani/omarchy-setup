@@ -21,7 +21,7 @@ cd ~/omarchy-setup
 | `packages` | Installs [`packages/pacman.txt`](packages/pacman.txt) and [`packages/aur.txt`](packages/aur.txt) with `omarchy pkg add` / `omarchy pkg aur add` |
 | `shell` | Oh My Zsh, and zsh as the login shell |
 | `configs` | Copies [`home/`](home) into `~`. A file that differs is first backed up to `<file>.bak-<timestamp>` |
-| `plugins` | My bar plugins from their own repos, dependencies included: [Jalali calendar](https://github.com/AryanHamedani/omarchy-jalali-calendar) (in the stock clock's place) and [Windscribe](https://github.com/AryanHamedani/omarchy-windscribe) (CLI, sign-in, split tunneling, weekly refresh) |
+| `plugins` | My bar plugins from their own repos, dependencies included: [Jalali calendar](https://github.com/AryanHamedani/jalali-calendar) (in the stock clock's place) and [Windscribe](https://github.com/AryanHamedani/windscribe-panel) (CLI, sign-in, split tunneling, weekly refresh) |
 | `tools` | `mise install` for the dev tools in [`mise/config.toml`](home/.config/mise/config.toml) |
 | `services` | voxtype as a user service, plus Tailscale |
 | `desk` | Remote desktop from my Windows PC into this laptop (below) |
@@ -34,8 +34,8 @@ Every step can be run again safely. After the first run: log out and back in, ru
 - **Hyprland**: US + Persian keyboard layouts (both Alt keys switch), 1.25 scale, and a lid
   binding that does nothing while the desk PC is connected.
 - **Omarchy shell**: bar layout and two plugins of mine, each in its own repo:
-  [Jalali calendar](https://github.com/AryanHamedani/omarchy-jalali-calendar) with Iran's
-  official holidays, and [Windscribe](https://github.com/AryanHamedani/omarchy-windscribe)
+  [Jalali calendar](https://github.com/AryanHamedani/jalali-calendar) with Iran's
+  official holidays, and [Windscribe](https://github.com/AryanHamedani/windscribe-panel)
   with ping-sorted locations and split tunneling.
 - **Terminals**: Ghostty, plus WezTerm for Persian/right-to-left text (Ghostty can't do BiDi).
 - **Shell**: zsh + Oh My Zsh with Omarchy's own aliases and functions carried over, starship,

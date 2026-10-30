@@ -53,8 +53,8 @@ configs() {
 # Windscribe's sign-in prompt.
 plugins() {
   step "Omarchy plugins: Jalali calendar and Windscribe"
-  bash <(curl -fsSL https://raw.githubusercontent.com/AryanHamedani/omarchy-jalali-calendar/main/install.sh) --replace-clock
-  bash <(curl -fsSL https://raw.githubusercontent.com/AryanHamedani/omarchy-windscribe/main/install.sh)
+  bash <(curl -fsSL https://raw.githubusercontent.com/AryanHamedani/jalali-calendar/main/install.sh) --replace-clock
+  bash <(curl -fsSL https://raw.githubusercontent.com/AryanHamedani/windscribe-panel/main/install.sh)
 }
 
 tools() {
