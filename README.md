@@ -23,6 +23,7 @@ cd ~/omarchy-setup
 | `configs` | Copies [`home/`](home) into `~`. A file that differs is first backed up to `<file>.bak-<timestamp>` |
 | `plugins` | My bar plugins from their own repos, dependencies included: [Jalali calendar](https://github.com/AryanHamedani/jalali-calendar) (in the stock clock's place) and [Windscribe](https://github.com/AryanHamedani/windscribe-panel) (CLI, sign-in, split tunneling, weekly refresh) |
 | `tools` | `mise install` for the dev tools in [`mise/config.toml`](home/.config/mise/config.toml) |
+| `kubevpn` | Clones [kubectl-vpn](https://github.com/AryanHamedani/kubectl-vpn) and prints its one-time install command: kubectl, k9s and helm reach one cluster through an isolated OpenVPN container that restarts on its own |
 | `services` | voxtype as a user service, plus Tailscale |
 | `desk` | Remote desktop from my Windows PC into this laptop (below) |
 

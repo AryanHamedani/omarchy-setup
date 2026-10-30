@@ -4,7 +4,7 @@
 #   ./install.sh               every step, in order
 #   ./install.sh configs desk  only the named steps
 #
-# Steps: packages shell configs plugins tools services desk
+# Steps: packages shell configs plugins tools kubevpn services desk
 # Re-running is safe: installed packages are skipped and a config that differs is backed up
 # to <file>.bak-<timestamp> before it is replaced.
 set -euo pipefail
@@ -62,6 +62,18 @@ tools() {
   mise install
 }
 
+# kubectl, k9s and helm for one cluster through an isolated OpenVPN container
+# (https://github.com/AryanHamedani/kubectl-vpn). The VPN profile, credentials and
+# cluster are never in this repo; its installer asks for them locally.
+kubevpn() {
+  step "kubectl-vpn: one cluster through an isolated OpenVPN container"
+  local dir=~/Work/personal/AryanHamedani/kubectl-vpn
+  [[ -d $dir ]] || git clone https://github.com/AryanHamedani/kubectl-vpn.git "$dir"
+  git -C "$dir" pull --ff-only
+  echo "  Select the cluster's context, then run once:"
+  echo "    python3 $dir/install.py --profile /path/to/vpn.ovpn"
+}
+
 services() {
   step "User services and Tailscale"
   systemctl --user daemon-reload
@@ -96,7 +108,7 @@ desk() {
   systemctl --user --no-pager status hypr-rdp.service | head -3
 }
 
-all=(packages shell configs plugins tools services desk)
+all=(packages shell configs plugins tools kubevpn services desk)
 steps=("$@")
 ((${#steps[@]})) || steps=("${all[@]}")
 for name in "${steps[@]}"; do
