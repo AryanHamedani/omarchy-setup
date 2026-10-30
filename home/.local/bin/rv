@@ -128,8 +128,11 @@ ai() {
   touch "$running"
   trap 'rm -f "$running"' EXIT
   echo "rv: AI review of !$iid${focus:+ (focus: $focus)}"
+  # The MR branch is untrusted: ignore its .claude/ settings, hooks and .mcp.json, deny anything not
+  # allowed below (the user default is auto), and block git's file-writing and external-diff options.
   (cd "$w" && claude -p --output-format stream-json --verbose \
-    --disallowedTools Edit Write NotebookEdit \
+    --setting-sources user --strict-mcp-config --permission-mode dontAsk \
+    --disallowedTools Edit Write NotebookEdit "Bash(git * --output*)" "Bash(git * --ext-diff*)" "Bash(git * --textconv*)" \
     --allowedTools Read Grep Glob "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(glab mr view:*)" -- "$(cat <<EOF
 First-pass code review of merge request !$iid: $title
 Diff under review: \`git diff $base $sha\` (run it). The description is in \`glab mr view $iid\`. Read surrounding code with \`git show $sha:<path>\` or Read/Grep when a hunk depends on it.
@@ -154,7 +157,7 @@ EOF
     else grep -vE ': \(ai\) |: \[read\] |^# verdict' "$f" >>"$f.new" || true; fi
   fi
   mv "$f.new" "$f"
-  [[ -n ${FZF_PORT:-} ]] && curl -s -XPOST "localhost:$FZF_PORT" -d "reload($self list)" >/dev/null || true
+  [[ -n ${FZF_PORT:-} ]] && curl -s -XPOST "localhost:$FZF_PORT" -H "x-api-key: ${FZF_API_KEY:-}" -d "reload($self list)" >/dev/null || true
   echo
   grep '^# verdict' "$f" | head -1
   echo "rv: $(grep -c ': (ai) ' "$f" || true) finding(s), $(grep -c ': \[read\] ' "$f" || true) hunk(s) to read"
@@ -178,7 +181,7 @@ ask() {
   w=$(worktree "$1")
   c=$(context "$1")
   cd "$w"
-  claude --permission-mode plan --append-system-prompt-file "$c" "Summarise MR !$1 in five lines: what it changes, the riskiest part, and what I should check first. Then wait for my questions."
+  claude --setting-sources user --strict-mcp-config --permission-mode plan --append-system-prompt-file "$c" "Summarise MR !$1 in five lines: what it changes, the riskiest part, and what I should check first. Then wait for my questions."
 }
 
 fix() {
@@ -218,6 +221,9 @@ queue() {
   local r="reload($self list)" h
   h=$'enter review · ctrl-r AI (one, ask focus) · alt-r AI all · ctrl-a ask Claude · ctrl-f Claude fixes accepted\n'
   h+=$'ctrl-d diff · alt-a approve · ctrl-o web · ctrl-x done · alt-d +drafts · ctrl-l reload'
+  # fzf's listen port accepts actions like execute(); only callers holding this key may use it.
+  FZF_API_KEY=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+  export FZF_API_KEY
   list | fzf --listen --ansi --delimiter='\t' --no-sort --layout=reverse --header "$h" --header-first \
     --preview "$self preview {1}" --preview-window 'right,50%,wrap' \
     --bind "enter:execute($self open {1})+$r" \

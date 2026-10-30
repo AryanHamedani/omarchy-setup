@@ -8,7 +8,8 @@ dir=$(dirname "$file")
 while [[ $dir != / && ! -f $dir/pyproject.toml ]]; do dir=$(dirname "$dir"); done
 grep -q '^\[tool\.ruff' "$dir/pyproject.toml" 2>/dev/null || exit 0
 # The repo's own ruff: its venv, else the version pinned in pyproject.toml via uvx.
-if [[ -x $dir/.venv/bin/ruff ]]; then
+# A .venv the repo tracks is the repo's code, not one uv built here; don't run it.
+if [[ -x $dir/.venv/bin/ruff ]] && ! git -C "$dir" ls-files --error-unmatch .venv/bin/ruff &>/dev/null; then
   ruff=("$dir/.venv/bin/ruff")
 elif pin=$(grep -oP '"ruff==\K[0-9.]+' "$dir/pyproject.toml" | head -1) && [[ -n $pin ]]; then
   ruff=(uvx --quiet "ruff@$pin")

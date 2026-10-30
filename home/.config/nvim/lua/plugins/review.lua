@@ -128,6 +128,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 return {
   -- Read-only Claude that knows the MR (findings included as of opening).
-  { "coder/claudecode.nvim", opts = { terminal_cmd = "claude --permission-mode plan --append-system-prompt-file " .. vim.fn.shellescape(ctx) } },
+  { "coder/claudecode.nvim", opts = { terminal_cmd = "claude --setting-sources user --strict-mcp-config --permission-mode plan --append-system-prompt-file " .. vim.fn.shellescape(ctx) } },
   { "folke/which-key.nvim", opts = { spec = { { "<leader>r", group = "review !" .. iid } } } },
 }
