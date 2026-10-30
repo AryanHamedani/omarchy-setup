@@ -4,7 +4,7 @@
 #   ./install.sh               every step, in order
 #   ./install.sh configs desk  only the named steps
 #
-# Steps: packages shell configs tools services desk
+# Steps: packages shell configs plugins tools services desk
 # Re-running is safe: installed packages are skipped and a config that differs is backed up
 # to <file>.bak-<timestamp> before it is replaced.
 set -euo pipefail
@@ -47,6 +47,16 @@ configs() {
   fi
 }
 
+# My two bar plugins, from their own repos. Each installer pulls its own
+# dependencies (windscribe-cli, the Vazirmatn font) and is safe to rerun.
+# `bash <(curl …)` rather than `curl | bash` keeps the terminal on stdin for
+# Windscribe's sign-in prompt.
+plugins() {
+  step "Omarchy plugins: Jalali calendar and Windscribe"
+  bash <(curl -fsSL https://raw.githubusercontent.com/AryanHamedani/omarchy-jalali-calendar/main/install.sh) --replace-clock
+  bash <(curl -fsSL https://raw.githubusercontent.com/AryanHamedani/omarchy-windscribe/main/install.sh)
+}
+
 tools() {
   step "Dev tools from ~/.config/mise/config.toml"
   mise install
@@ -55,10 +65,9 @@ tools() {
 services() {
   step "User services and Tailscale"
   systemctl --user daemon-reload
-  systemctl --user enable --now voxtype.service windscribe-iran-refresh.timer
+  systemctl --user enable --now voxtype.service
   sudo systemctl enable --now tailscaled
   echo "  Sign in to Tailscale once: sudo tailscale up --operator=$USER"
-  echo "  Sign in to Windscribe once: windscribe-cli login"
 }
 
 desk() {
@@ -87,7 +96,7 @@ desk() {
   systemctl --user --no-pager status hypr-rdp.service | head -3
 }
 
-all=(packages shell configs tools services desk)
+all=(packages shell configs plugins tools services desk)
 steps=("$@")
 ((${#steps[@]})) || steps=("${all[@]}")
 for name in "${steps[@]}"; do

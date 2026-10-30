@@ -21,19 +21,22 @@ cd ~/omarchy-setup
 | `packages` | Installs [`packages/pacman.txt`](packages/pacman.txt) and [`packages/aur.txt`](packages/aur.txt) with `omarchy pkg add` / `omarchy pkg aur add` |
 | `shell` | Oh My Zsh, and zsh as the login shell |
 | `configs` | Copies [`home/`](home) into `~`. A file that differs is first backed up to `<file>.bak-<timestamp>` |
+| `plugins` | My bar plugins from their own repos, dependencies included: [Jalali calendar](https://github.com/AryanHamedani/omarchy-jalali-calendar) (in the stock clock's place) and [Windscribe](https://github.com/AryanHamedani/omarchy-windscribe) (CLI, sign-in, split tunneling, weekly refresh) |
 | `tools` | `mise install` for the dev tools in [`mise/config.toml`](home/.config/mise/config.toml) |
-| `services` | voxtype and the weekly Windscribe refresh as user services, plus Tailscale |
+| `services` | voxtype as a user service, plus Tailscale |
 | `desk` | Remote desktop from my Windows PC into this laptop (below) |
 
 Every step can be run again safely. After the first run: log out and back in, run
-`sudo tailscale up --operator=$USER` and `windscribe-cli login` once.
+`sudo tailscale up --operator=$USER` once.
 
 ## What's in it
 
 - **Hyprland**: US + Persian keyboard layouts (both Alt keys switch), 1.25 scale, and a lid
   binding that does nothing while the desk PC is connected.
-- **Omarchy shell**: bar layout and two plugins of mine: a Jalali (Persian) calendar with
-  Iranian holidays, and a Windscribe VPN indicator.
+- **Omarchy shell**: bar layout and two plugins of mine, each in its own repo:
+  [Jalali calendar](https://github.com/AryanHamedani/omarchy-jalali-calendar) with Iran's
+  official holidays, and [Windscribe](https://github.com/AryanHamedani/omarchy-windscribe)
+  with ping-sorted locations and split tunneling.
 - **Terminals**: Ghostty, plus WezTerm for Persian/right-to-left text (Ghostty can't do BiDi).
 - **Shell**: zsh + Oh My Zsh with Omarchy's own aliases and functions carried over, starship,
   atuin, direnv. Omarchy's `ga`/`gd` worktree helpers become `gwa`/`gwd`, so `ga`/`gd` stay
@@ -43,8 +46,8 @@ Every step can be run again safely. After the first run: log out and back in, ru
   `~/.config/vault/env` (mode 600, never in this repo). `~/.zshenv` loads them in every zsh.
   `vault set NAME "description"`, `vault list`.
 - **Git**: delta for diffs, rebase on pull, zdiff3 conflicts.
-- **Windscribe**: a weekly job keeps Iranian networks out of the VPN tunnel
-  ([`windscribe-refresh-iran`](home/.local/bin/windscribe-refresh-iran)).
+- **Windscribe**: Iranian networks stay out of the VPN tunnel, refreshed weekly by the
+  plugin's own timer.
 - **`winpc`**: remote desktop from this laptop into the Windows PC.
 
 ## Desk: the Windows PC works on this laptop over RDP

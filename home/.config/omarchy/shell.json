@@ -42,7 +42,10 @@
           "id": "omarchy.network"
         },
         {
-          "id": "io.github.aryanhamedani.windscribe"
+          "id": "io.github.aryanhamedani.windscribe",
+          "pinnedRegions": [
+            "US"
+          ]
         },
         {
           "id": "omarchy.audio"
